@@ -1,4 +1,41 @@
-use std::fmt::{Display, Debug};
+#![feature(return_position_impl_trait_in_trait)]
+
+use std::fmt::Display;
+
+
+fn main() {
+  let mut sudoku =
+    Sudoku::from(
+      [0,3,4, 1,0,0, 0,0,0
+      ,0,0,2, 0,0,8, 0,0,0
+      ,0,7,0, 0,0,0, 0,0,4
+
+      ,0,0,0, 0,2,0, 3,0,7
+      ,0,6,0, 0,8,4, 0,0,5
+      ,0,0,0, 0,9,0, 0,2,0
+
+      ,9,0,0, 0,0,0, 0,4,0
+      ,6,2,5, 0,0,0, 0,8,9
+      ,0,0,0, 0,6,9, 0,1,0]
+    );
+
+  println!( "== INITIAL" );
+  println!( "{}", sudoku );
+  println!( );
+
+  if let Ok( () ) = solve( &mut sudoku ) {
+    if sudoku.is_solved( ) {
+      println!( "== SOLVED" );
+    } else {
+      println!( "== SOLVING FAILED" );
+    }
+  } else {
+    // this should only happen for incorrect sudokus, or sudokus with multiple
+    // solutions, which we don't support.
+    println!( "== UNSOLVABLE" );
+  }
+}
+
 
 /// 9 bit flags, each representing whether a value is possible (1) or not (0)
 #[derive(Copy,Clone)]
@@ -34,24 +71,6 @@ impl SudokuCell {
       None
     }
   }
-
-  /// Returns `true` iff the provided value is possible in this cell
-  pub fn is_possible( &self, v: usize ) -> bool {
-    debug_assert!( 1 <= v && v <= 9 );
-    ( ( self.0 >> ( v - 1 ) ) & 1 ) != 0
-  }
-}
-
-impl Debug for SudokuCell {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!( f, "{{" )?;
-    for i in 1..=9 {
-      if self.is_possible( i ) {
-        write!( f, "{},", i )?;
-      }
-    }
-    write!( f, "}}" )
-  }
 }
 
 #[derive(Clone)]
@@ -65,12 +84,40 @@ impl Sudoku {
   pub fn is_solved( &self ) -> bool {
     self.0.iter( ).all( |x| x.is_solved( ) )
   }
+
+  /// Returns that bitmask of values that necessarily exist in the 3-cell
+  /// fragment.
+  pub fn frag_necessary< F: ThreeCellFragment >( &self, frag: &F ) -> usize {
+    // values that are possible outside our fragment, in the row
+    let row_ext_possible: usize =
+      frag.ext_adjacent_cells( )
+        .map( |idx| self.0[ idx ].0 )
+        .fold( 0b000_000_000,  |acc, opts| ( acc | opts ) );
+
+    // values that are possible outside our fragment, in the block
+    let block_ext_possible =
+      frag.ext_block_cells( )
+        .map( |idx| self.0[ idx ].0 )
+        .fold( 0b000_000_000,  |acc, opts| ( acc | opts ) );
+
+    // things that are *impossible outside our fragment*, surely have to be
+    // inside our fragment.
+    ( !row_ext_possible | !block_ext_possible | self.frag_solutions( frag ) ) & 0b111_111_111
+  }
+
+  /// Returns a bitmask with bits set for solved cells within the fragment.
+  pub fn frag_solutions< F: ThreeCellFragment >( &self, frag: &F ) -> usize {
+    frag.cells( )
+        .map( |cell_idx| self.0[ cell_idx ] )
+        .filter( |cell| cell.is_solved( ) )
+        .fold( 0b000_000_000,  |acc, opts| ( acc | opts.0 ) )
+  }
 }
 
 impl From< [u8; 9*9] > for Sudoku {
   fn from( cells: [u8; 9*9] ) -> Sudoku {
     // We construct a sudoku from the cells. 0 represents that everything is
-    // possible
+    // possible. Other values are constants.
     let mut out_cells = [SudokuCell::new_all(); 9*9];
     for i in 0..9*9 {
       if cells[ i ] != 0 {
@@ -90,12 +137,12 @@ impl Display for Sudoku {
         } else {
           write!( f, "_" )?;
         }
-        if x == 2 || x == 5 {
+        if x == 2 || x == 5 { // diagonal separator (after 3 columns)
           write!( f, " " )?;
         }
       }
       writeln!( f )?;
-      if y == 2 || y == 5 {
+      if y == 2 || y == 5 { // horizontal separator (after 3 rows)
         writeln!( f )?;
       }
     }
@@ -103,10 +150,143 @@ impl Display for Sudoku {
   }
 }
 
+/// Generalizes over row/column fragments in a sudoku
+trait ThreeCellFragment {
+  /// Returns the 3 cells inside the fragment
+  fn cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a;
+
+  /// Returns the cell indices outside the fragment, but that are still
+  /// influenced by this fragment. (i.e., in the same block, and row or column,
+  /// for row/column fragments, respectively)
+  fn ext_cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    self.ext_adjacent_cells( ).chain( self.ext_block_cells( ) )
+  }
+
+  /// Returns the cell indices outside the fragment, but inside the same row/column.
+  ///   (for row/column fragments, respectively)
+  fn ext_adjacent_cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a;
+
+  /// Returns the cell indices outside the fragment, but inside the same block.
+  fn ext_block_cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a;
+}
+
+/// A fragment of length 3 in a row.
+struct RowFragment {
+  /// Invariant: 0 <= y < 9
+  y: usize,
+
+  /// Invariant: 0 <= frag_x < 3
+  frag_x: usize
+}
+
+/// A fragment of length 3 in a column.
+struct ColFragment {
+  /// Invariant: 0 <= x < 9
+  x: usize,
+
+  /// Invariant: 0 <= frag_y < 3
+  frag_y: usize
+}
+
+impl ThreeCellFragment for RowFragment {
+  fn cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    (0..3).map( |x| self.y * 9 + self.frag_x * 3 + x )
+  }
+
+  fn ext_adjacent_cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    (3..9).map( |x| self.y * 9 + ( self.frag_x * 3 + x ) % 9 )
+  }
+
+  fn ext_block_cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    // the y of the top row in *the block*
+    let base_y = self.y - self.y % 3;
+    (1..3).flat_map(
+      move |y| {
+        let other_row_y = base_y + ( self.y + y ) % 3;
+        (0..3).map( move |x| other_row_y * 9 + ( self.frag_x * 3 + x ) )
+      }
+    )
+  }
+}
+
+impl ThreeCellFragment for ColFragment {
+  fn cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    (0..3).map( |y| ( self.frag_y * 3 + y ) * 9 + self.x )
+  }
+
+  fn ext_adjacent_cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    (3..9).map( |y| ( ( self.frag_y * 3 + y ) % 9 ) * 9 + self.x )
+  }
+
+  fn ext_block_cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    // the x of the first column in *the block*
+    let base_x = self.x - self.x % 3;
+    (1..3).flat_map(
+      move |x| {
+        let other_col_x = base_x + ( self.x + x ) % 3;
+        (0..3).map( move |y| ( self.frag_y * 3 + y ) * 9 + other_col_x )
+      }
+    )
+  }
+}
+
+type HasProgressed = bool;
+
+/// Find values that necessarily exist in a 3-cell fragment, and exclude
+/// those from the fragment in the same block and row/col (for row/col
+/// fragments, respectively).
+fn frag_exclusions< F: ThreeCellFragment >(
+  sudoku: &mut Sudoku,
+  frag: &F
+) -> Result< HasProgressed, Error > {
+  // A bitmask, set for values that must be in the fragment.
+  let frag_necessary = sudoku.frag_necessary( frag );
+
+  // If more than 3 values is necessary in a 3-cell fragment, surely it's
+  // unsolvable.
+  if frag_necessary.count_ones( ) > 3 {
+    return Err( Error::Unsolvable );
+  }
+
+  let mut has_progressed = false;
+
+  // Iterate over the cells influenced by our fragment
+  //   (i.e., in the same block and row/column)
+  for cell_idx in frag.ext_cells( ) {
+    // The values that are necessary in our fragment, are impossible in
+    // its influenced cells. So remove those options.
+
+    if sudoku.0[ cell_idx ].0 & frag_necessary != 0 {
+      has_progressed = true;
+    }
+    sudoku.0[ cell_idx ].0 &= !frag_necessary;
+  }
+
+  Ok( has_progressed )
+}
+
+/// Perform a single iteration of excluding outside all 3-cell row/col fragments
+fn exclusion_step( sudoku: &mut Sudoku ) -> Result< HasProgressed, Error > {
+  let mut has_progressed = false;
+
+  for y in 0..9 {
+    for frag_x in 0..3 {
+      has_progressed = frag_exclusions( sudoku, &RowFragment { y, frag_x } )? || has_progressed;
+    }
+  }
+
+  for x in 0..9 {
+    for frag_y in 0..3 {
+      has_progressed = frag_exclusions( sudoku, &ColFragment { x, frag_y } )? || has_progressed;
+    }
+  }
+
+  Ok( has_progressed )
+}
+
 fn solve( sudoku: &mut Sudoku ) -> Result< (), Error > {
   // Keeps going as long as we made progress
-  while row_necessary_exclusions( sudoku )?
-          || col_necessary_exclusions( sudoku )? {
+  while exclusion_step( sudoku )? {
     println!( "== STEP" );
     println!( "{}", sudoku );
     println!( );
@@ -114,191 +294,5 @@ fn solve( sudoku: &mut Sudoku ) -> Result< (), Error > {
   Ok( () )
 }
 
-/// Returns that bitmask of values that necessarily exist in the row fragment.
-/// 
-/// Precondition: 0 <= y < 9, 0 <= frag_x < 3
-fn find_row_necessary( sudoku: &Sudoku, y: usize, frag_x: usize ) -> usize {
-  // values that are possible outside our fragment
-  let mut row_ext_possible   = 0b000_000_000;
-  let mut block_ext_possible = 0b000_000_000;
-
-  // check the entire row
-  for x in 0..9 {
-    if x < frag_x * 3 || x >= frag_x * 3 + 3 { // in *other* blocks
-      row_ext_possible |= sudoku.0[ y * 9 + x ].0;
-    }
-  }
-
-  // check the other 2 rows in the block
-  for block_y in (y/3)*3..((y/3)*3 + 3) {
-    if block_y != y { // *other* rows
-      for x in 0..3 {
-        block_ext_possible |= sudoku.0[ block_y * 9 + frag_x * 3 + x ].0;
-      }
-    }
-  }
-
-  // the things that are impossible outside our fragment, surely have to be
-  // inside our fragment.
-  let mut frag_necessary = ( !row_ext_possible | !block_ext_possible ) & 0b111_111_111;
-  for x in 0..3 {
-    let i = y * 9 + frag_x * 3 + x;
-    if let Some( v ) = sudoku.0[ i ].solution( ) {
-      frag_necessary |= 1 << ( v - 1 );
-    }
-  }
-
-  frag_necessary
-}
-
-/// Find values that necessarily exist in a particular row fragment, and exclude
-/// those from the fragment in the same row and block.
-fn row_necessary_exclusions( sudoku: &mut Sudoku ) -> Result< bool, Error > {
-  let mut has_progressed = false;
-  for y in 0..9 {
-    // there are 3 "row fragments" of length 3 in a row.
-    for frag_x in 0..3 {
-      let frag_necessary = find_row_necessary( sudoku, y, frag_x );
-
-      if frag_necessary.count_ones( ) > 3 {
-        return Err( Error::Unsolvable );
-      }
-
-      for x in 0..9 {
-        if x < frag_x * 3 || x >= frag_x * 3 + 3 { // in *other* blocks
-          if sudoku.0[ y * 9 + x ].0 & frag_necessary != 0 {
-            // we'll remove an option, hence we progressed
-            has_progressed = true;
-          }
-          sudoku.0[ y * 9 + x ].0 &= !frag_necessary;
-        }
-      }
-
-      for block_y in (y/3)*3..((y/3)*3 + 3) {
-        if block_y != y { // *other* rows
-          for x in 0..3 {
-            let i = block_y * 9 + frag_x * 3 + x;
-            if sudoku.0[ i ].0 & frag_necessary != 0 {
-              // we'll remove an option, hence we progressed
-              has_progressed = true;
-            }
-            sudoku.0[ i ].0 &= !frag_necessary;
-          }
-        }
-      }
-    }
-  }
-
-  Ok( has_progressed )
-}
-
-/// Returns that bitmask of values that necessarily exist in the column
-/// fragment.
-/// 
-/// Precondition: 0 <= x < 9, 0 <= frag_y < 3
-fn find_col_necessary( sudoku: &mut Sudoku, x: usize, frag_y: usize ) -> usize {
-  // values that are possible outside our fragment
-  let mut col_ext_possible   = 0b000_000_000;
-  let mut block_ext_possible = 0b000_000_000;
-
-  // check the entire column
-  for y in 0..9 {
-    if y < frag_y * 3 || y >= frag_y * 3 + 3 { // in *other* blocks
-      col_ext_possible |= sudoku.0[ y * 9 + x ].0;
-    }
-  }
-
-  // check the other 2 columns in the block
-  for block_x in (x/3)*3..((x/3)*3 + 3) {
-    if block_x != x { // *other* columns
-      for y in 0..3 {
-        block_ext_possible |= sudoku.0[ ( frag_y * 3 + y ) * 9 + block_x ].0;
-      }
-    }
-  }
-
-  // the things that are impossible outside our fragment, surely have to be
-  // inside our fragment.
-  let mut frag_necessary = ( !col_ext_possible | !block_ext_possible ) & 0b111_111_111;
-  for y in 0..3 {
-    let i = ( frag_y * 3 + y ) * 9 + x;
-    if let Some( v ) = sudoku.0[ i ].solution( ) {
-      frag_necessary |= 1 << ( v - 1 );
-    }
-  }
-  frag_necessary
-}
-
-/// Find values that necessarily exist in a particular column fragment, and
-/// exclude those from the fragment in the same column and block.
-fn col_necessary_exclusions( sudoku: &mut Sudoku ) -> Result< bool, Error > {
-  let mut has_progressed = false;
-
-  for x in 0..9 {
-    // there are 3 "column fragments" of length 3 in a column.
-    for frag_y in 0..3 {
-      let frag_necessary = find_col_necessary( sudoku, x, frag_y );
-
-      if frag_necessary.count_ones( ) > 3 {
-        return Err( Error::Unsolvable );
-      }
-
-      for y in 0..9 {
-        if y < frag_y * 3 || y >= frag_y * 3 + 3 { // in *other* blocks
-          if sudoku.0[ y * 9 + x ].0 & frag_necessary != 0 {
-            // we'll remove an option, hence we progressed
-            has_progressed = true;
-          }
-          sudoku.0[ y * 9 + x ].0 &= !frag_necessary;
-        }
-      }
-
-      for block_x in (x/3)*3..((x/3)*3 + 3) {
-        if block_x != x { // *other* columns
-          for y in 0..3 {
-            let i = ( frag_y * 3 + y ) * 9 + block_x;
-            if sudoku.0[ i ].0 & frag_necessary != 0 {
-              // we'll remove an option, hence we progressed
-              has_progressed = true;
-            }
-            sudoku.0[ i ].0 &= !frag_necessary;
-          }
-        }
-      }
-    }
-  }
-
-  Ok( has_progressed )
-}
-
-fn main() {
-  let mut sudoku =
-    Sudoku::from(
-      [0,3,4, 1,0,0, 0,0,0
-      ,0,0,2, 0,0,8, 0,0,0
-      ,0,7,0, 0,0,0, 0,0,4
-
-      ,0,0,0, 0,2,0, 3,0,7
-      ,0,6,0, 0,8,4, 0,0,5
-      ,0,0,0, 0,9,0, 0,2,0
-      
-      ,9,0,0, 0,0,0, 0,4,0
-      ,6,2,5, 0,0,0, 0,8,9
-      ,0,0,0, 0,6,9, 0,1,0]
-    );
-
-  println!( "== INITIAL" );
-  println!( "{}", sudoku );
-  println!( );
-  
-  // Keeps going as long as we made progress
-  if let Ok( () ) = solve( &mut sudoku ) {
-    if sudoku.is_solved( ) {
-      println!( "== SOLVED" );
-    } else {
-      println!( "== SOLVING FAILED" );
-    }
-  } else {
-    println!( "== UNSOLVABLE" );
-  }
-}
+#[cfg(test)]
+mod tests;
