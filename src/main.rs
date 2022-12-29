@@ -4,19 +4,21 @@ use std::fmt::Display;
 
 
 fn main() {
+  // A rather difficult Sudoku, which requires both implemented strategies.
+  //   (For strategies, see [`exclusion_step`] and [`solve_unique_cells`])
   let mut sudoku =
     Sudoku::from(
-      [0,3,4, 1,0,0, 0,0,0
-      ,0,0,2, 0,0,8, 0,0,0
-      ,0,7,0, 0,0,0, 0,0,4
+      [4,1,0, 0,0,6, 0,0,0
+      ,0,9,0, 0,7,0, 5,0,1
+      ,0,0,0, 0,0,0, 0,2,0
 
-      ,0,0,0, 0,2,0, 3,0,7
-      ,0,6,0, 0,8,4, 0,0,5
-      ,0,0,0, 0,9,0, 0,2,0
+      ,0,0,0, 0,8,0, 0,3,0
+      ,9,0,0, 4,0,0, 2,0,8
+      ,0,2,0, 0,0,0, 0,7,0
 
-      ,9,0,0, 0,0,0, 0,4,0
-      ,6,2,5, 0,0,0, 0,8,9
-      ,0,0,0, 0,6,9, 0,1,0]
+      ,0,5,0, 0,1,0, 8,0,9
+      ,0,0,1, 7,0,0, 0,0,0
+      ,0,0,0, 0,0,0, 0,0,3]
     );
 
   println!( "== INITIAL" );
@@ -71,6 +73,17 @@ impl SudokuCell {
       None
     }
   }
+  
+  /// Returns `true` iff the provided value is possible in this cell
+  pub fn is_possible( &self, v: usize ) -> bool {
+    debug_assert!( 1 <= v && v <= 9 );
+    ( ( self.0 >> ( v - 1 ) ) & 1 ) != 0
+  }
+
+  /// Return an iterator with possible solutions for this cell
+  pub fn possible_values< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a {
+    (1..=9).filter( |val| self.is_possible( *val ) )
+  }
 }
 
 #[derive(Clone)]
@@ -85,8 +98,8 @@ impl Sudoku {
     self.0.iter( ).all( |x| x.is_solved( ) )
   }
 
-  /// Returns that bitmask of values that necessarily exist in the 3-cell
-  /// fragment.
+  /// Returns a bitmask of values that necessarily exist in the 3-cell
+  /// fragment. (i.e., because they're impossible outside it)
   pub fn frag_necessary< F: ThreeCellFragment >( &self, frag: &F ) -> usize {
     // values that are possible outside our fragment, in the row
     let row_ext_possible: usize =
@@ -150,7 +163,8 @@ impl Display for Sudoku {
   }
 }
 
-/// Generalizes over row/column fragments in a sudoku
+/// Generalizes over 3-cell row/column fragments in a block. Effectively, it
+/// captures the intersection between a row (or column) and a block.
 trait ThreeCellFragment {
   /// Returns the 3 cells inside the fragment
   fn cells< 'a >( &'a self ) -> impl Iterator< Item = usize > + 'a;
@@ -233,7 +247,7 @@ impl ThreeCellFragment for ColFragment {
 type HasProgressed = bool;
 
 /// Find values that necessarily exist in a 3-cell fragment, and exclude
-/// those from the fragment in the same block and row/col (for row/col
+/// those from the other fragments in the same block and row/col (for row/col
 /// fragments, respectively).
 fn frag_exclusions< F: ThreeCellFragment >(
   sudoku: &mut Sudoku,
@@ -266,6 +280,9 @@ fn frag_exclusions< F: ThreeCellFragment >(
 }
 
 /// Perform a single iteration of excluding outside all 3-cell row/col fragments
+///
+/// Values that necessarily exist in a 3-cell row (or column) fragment, cannot
+/// be solutions for its influenced cells (i.e., in the same block and row/col).
 fn exclusion_step( sudoku: &mut Sudoku ) -> Result< HasProgressed, Error > {
   let mut has_progressed = false;
 
@@ -284,9 +301,79 @@ fn exclusion_step( sudoku: &mut Sudoku ) -> Result< HasProgressed, Error > {
   Ok( has_progressed )
 }
 
+/// Returns an iterator that produces all indices in the given row
+fn row_iter( y: usize ) -> impl Iterator< Item = usize > {
+  (0..9).map( move |x| y * 9 + x )
+}
+
+/// Returns an iterator that produces all indices in the given column
+fn col_iter( x: usize ) -> impl Iterator< Item = usize > {
+  (0..9).map( move |y| y * 9 + x )
+}
+
+/// Returns an iterator that produces all indices in the given block
+fn block_iter( idx: usize ) -> impl Iterator< Item = usize > {
+  let y = ( idx / 3 ) * 3; // y of block's top-left cell
+  let x = ( idx % 3 ) * 3; // x of block's top-left cell
+  (y..y+3).flat_map( move |y| (x..x+3).map( move |x| y * 9 + x ) )
+}
+
+/// Whenever a cell is the only one in its row/column/block with a particular
+/// option, then it must have that value.
+///
+/// This function performs that step for a single row/column/block.
+fn solve_unique_cell( sudoku: &mut Sudoku, iter: impl Iterator< Item = usize > ) -> HasProgressed {
+  let mut has_progressed = false;
+
+  // First, we find out which value options occur only once.
+  let mut counts: [usize; 9] = [0; 9]; // maps vals to counts
+  let mut idxs: [usize; 9] = [0; 9]; // maps vals to idxs
+  for idx in iter {
+    for val in sudoku.0[ idx ].possible_values( ) {
+      counts[ val - 1 ] += 1;
+      idxs[ val - 1 ] = idx;
+    }
+  }
+
+  // Then, for the values that occur only once, we solve its cell
+  let unique_val_idxs =
+    (1..=9).filter( |val| counts[ val - 1 ] == 1 ) // is unique?
+      .map( |val| (val, idxs[ val - 1 ]) ); // find the cell index
+
+  for (val, idx) in unique_val_idxs {
+    // if it was already solved, solving it again doesn't count as progress
+    has_progressed = has_progressed || !sudoku.0[ idx ].is_solved( );
+    sudoku.0[ idx ] = SudokuCell::new_const( val );
+  }
+
+  has_progressed
+}
+
+/// Whenever a cell is the only one in its row/column/block with a particular
+/// option, then it must have that value.
+///
+/// Performs one iteration over all rows, columns, and blocks.
+fn solve_unique_cells( sudoku: &mut Sudoku ) -> HasProgressed {
+  let mut has_progressed = false;
+
+  for y in 0..9 {
+    has_progressed = solve_unique_cell( sudoku, row_iter( y ) ) || has_progressed;
+  }
+
+  for x in 0..9 {
+    has_progressed = solve_unique_cell( sudoku, col_iter( x ) ) || has_progressed;
+  }
+
+  for block_idx in 0..9 {
+    has_progressed = solve_unique_cell( sudoku, block_iter( block_idx ) ) || has_progressed;
+  }
+
+  has_progressed
+}
+
 fn solve( sudoku: &mut Sudoku ) -> Result< (), Error > {
   // Keeps going as long as we made progress
-  while exclusion_step( sudoku )? {
+  while exclusion_step( sudoku )? || solve_unique_cells( sudoku ) {
     println!( "== STEP" );
     println!( "{}", sudoku );
     println!( );
